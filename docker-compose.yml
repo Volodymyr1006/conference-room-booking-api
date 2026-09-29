@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_PATH: /app/data/booking.db
+    volumes:
+      # База даних зберігається поза контейнером і не зникає при перезапуску
+      - booking-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  booking-data:

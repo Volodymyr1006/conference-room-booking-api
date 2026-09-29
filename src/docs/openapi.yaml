@@ -1,0 +1,782 @@
+openapi: 3.0.3
+info:
+  title: Conference Rooms Booking API
+  version: 1.0.0
+  description: |
+    API для управління конференц-залами, бронюваннями та розрахунку вартості оренди.
+
+    ## Автентифікація
+    Кожен запит до `/api/v1` має містити заголовок **`X-API-Key`**.
+    Натисніть кнопку **Authorize** угорі праворуч і вставте ключ з файлу `.env`.
+
+    | Роль | Ключ | Доступ |
+    |---|---|---|
+    | Адміністратор | `ADMIN_API_KEY` | усе, включно з керуванням залами, списком бронювань і звітами |
+    | Клієнт | `CLIENT_API_KEY` | перегляд і пошук залів, розрахунок вартості, бронювання, скасування за id |
+
+    ## Формати
+    - Дата: `ДД.ММ.РРРР` (наприклад, `01.09.2024`)
+    - Час: `ГГ:ХХ` (наприклад, `10:00`), крок — 30 хвилин
+    - Суми: у гривнях (UAH), до 2 знаків після коми
+
+    ## Тарифи (вартість оренди залу)
+    | Години | Тариф | Коефіцієнт |
+    |---|---|---|
+    | 06:00–09:00 | Ранкові | ×0.90 (знижка 10%) |
+    | 09:00–12:00, 14:00–18:00 | Стандартні | ×1.00 |
+    | 12:00–14:00 | Пікові | ×1.15 (націнка 15%) |
+    | 18:00–23:00 | Вечірні | ×0.80 (знижка 20%) |
+
+    Бронювання, що зачіпає кілька тарифів, рахується частинами. Ціни послуг фіксовані за одне бронювання
+    й не залежать від тарифу.
+
+    ## Помилки
+    Усі помилки мають однаковий формат: `{ "error": { "code": "...", "message": "...", "details": ... } }`.
+
+servers:
+  - url: /api/v1
+    description: Поточний сервер
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Rooms
+    description: Конференц-зали та їхні послуги
+  - name: Bookings
+    description: Розрахунок вартості та бронювання
+  - name: Reports
+    description: Звіти й аналітика для бізнесу (лише адміністратор)
+
+paths:
+  /rooms:
+    get:
+      tags: [Rooms]
+      summary: Список усіх залів
+      responses:
+        '200':
+          description: Список залів
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Room' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Rooms]
+      summary: Додати конференц-зал (адміністратор)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoomCreate' }
+            example:
+              name: Зал D
+              capacity: 50
+              basePricePerHour: 2000
+              services:
+                - { name: Проєктор, price: 500 }
+                - { name: Wi-Fi, price: 300 }
+      responses:
+        '201':
+          description: Зал створено
+          headers:
+            Location:
+              schema: { type: string }
+              description: Адреса нового залу
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomMessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /rooms/available:
+    get:
+      tags: [Rooms]
+      summary: Пошук доступних залів
+      description: |
+        Повертає зали з місткістю не меншою за вказану, вільні протягом усього проміжку.
+        Зали відсортовані від найменшого відповідного (найвигідніший варіант — першим).
+        Для кожного залу розраховано орієнтовну вартість оренди (без послуг).
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, example: 01.09.2024 }, description: 'Дата (ДД.ММ.РРРР)' }
+        - { name: startTime, in: query, required: true, schema: { type: string, example: '10:00' }, description: Час початку }
+        - { name: endTime, in: query, required: true, schema: { type: string, example: '14:00' }, description: Час завершення }
+        - { name: capacity, in: query, required: false, schema: { type: integer, minimum: 1, default: 1, example: 50 }, description: Мінімальна місткість }
+      responses:
+        '200':
+          description: Доступні зали
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  search:
+                    type: object
+                    properties:
+                      date: { type: string, example: 01.09.2024 }
+                      startTime: { type: string, example: '10:00' }
+                      endTime: { type: string, example: '14:00' }
+                      capacity: { type: integer, example: 50 }
+                  total: { type: integer, example: 2 }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AvailableRoom' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /rooms/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      tags: [Rooms]
+      summary: Інформація про зал
+      responses:
+        '200':
+          description: Зал
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Room' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Rooms]
+      summary: Редагувати інформацію про зал (адміністратор)
+      description: |
+        Оновлює лише передані поля. Якщо передати `services`, список послуг залу **повністю замінюється**.
+        Щоб додати одну послугу, не змінюючи інших, використовуйте `POST /rooms/{id}/services`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoomUpdate' }
+            example:
+              basePricePerHour: 2500
+      responses:
+        '200':
+          description: Зал оновлено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomMessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Rooms]
+      summary: Видалити зал (адміністратор)
+      description: |
+        Зал зникає з API, але історія його бронювань зберігається для звітів.
+        Якщо в залі є майбутні підтверджені бронювання, видалення заборонено (409) — спочатку скасуйте їх.
+      responses:
+        '200':
+          description: Зал видалено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string, example: Зал успішно видалено }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /rooms/{id}/services:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    post:
+      tags: [Rooms]
+      summary: Додати послугу до залу (адміністратор)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ServiceInput' }
+            example: { name: Звук, price: 700 }
+      responses:
+        '201':
+          description: Послугу додано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomMessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /rooms/{id}/services/{serviceId}:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: serviceId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Rooms]
+      summary: Видалити послугу із залу (адміністратор)
+      responses:
+        '200':
+          description: Послугу видалено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomMessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /bookings/quote:
+    post:
+      tags: [Bookings]
+      summary: Розрахувати вартість без бронювання
+      description: Показує, скільки коштуватиме бронювання, з деталізацією за тарифами. Нічого не зберігає.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QuoteRequest' }
+      responses:
+        '200':
+          description: Розрахунок вартості
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Quote' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /bookings:
+    post:
+      tags: [Bookings]
+      summary: Забронювати зал
+      description: |
+        Створює бронювання й повертає розрахунок загальної вартості.
+        Якщо зал уже зайнятий на цей час — 409. Бронювати в минулому не можна — 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingCreate' }
+      responses:
+        '201':
+          description: Бронювання підтверджено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string, example: 'Бронювання підтверджено. Загальна вартість: 9400 грн' }
+                  data: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+    get:
+      tags: [Bookings]
+      summary: Список бронювань (адміністратор)
+      parameters:
+        - { name: roomId, in: query, schema: { type: string, format: uuid } }
+        - { name: date, in: query, schema: { type: string, example: 01.09.2024 } }
+        - { name: status, in: query, schema: { type: string, enum: [confirmed, cancelled] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200':
+          description: Сторінка бронювань
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Booking' }
+                  pagination:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      limit: { type: integer }
+                      offset: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /bookings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/BookingId'
+    get:
+      tags: [Bookings]
+      summary: Інформація про бронювання
+      responses:
+        '200':
+          description: Бронювання
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /bookings/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/BookingId'
+    post:
+      tags: [Bookings]
+      summary: Скасувати бронювання
+      description: Скасувати можна лише бронювання, яке ще не почалося.
+      responses:
+        '200':
+          description: Бронювання скасовано
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string, example: Бронювання скасовано }
+                  data: { $ref: '#/components/schemas/Booking' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /reports/summary:
+    get:
+      tags: [Reports]
+      summary: Загальні показники за період
+      description: Виручка (оренда / послуги), кількість бронювань, частка скасувань, середній чек і тривалість.
+      parameters:
+        - $ref: '#/components/parameters/PeriodFrom'
+        - $ref: '#/components/parameters/PeriodTo'
+      responses:
+        '200':
+          description: Зведений звіт
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { $ref: '#/components/schemas/ReportPeriod' }
+                  data: { $ref: '#/components/schemas/SummaryReport' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reports/rooms:
+    get:
+      tags: [Reports]
+      summary: Ефективність залів
+      description: Виручка, кількість бронювань і завантаженість (% робочого часу 06:00–23:00) кожного залу.
+      parameters:
+        - $ref: '#/components/parameters/PeriodFrom'
+        - $ref: '#/components/parameters/PeriodTo'
+      responses:
+        '200':
+          description: Звіт по залах
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { $ref: '#/components/schemas/ReportPeriod' }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/RoomPerformance' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reports/services:
+    get:
+      tags: [Reports]
+      summary: Популярність послуг
+      parameters:
+        - $ref: '#/components/parameters/PeriodFrom'
+        - $ref: '#/components/parameters/PeriodTo'
+      responses:
+        '200':
+          description: Звіт по послугах
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { $ref: '#/components/schemas/ReportPeriod' }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ServicePopularity' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reports/tariffs:
+    get:
+      tags: [Reports]
+      summary: Виручка за тарифами
+      description: Скільки годин і виручки припадає на ранкові, стандартні, пікові та вечірні години.
+      parameters:
+        - $ref: '#/components/parameters/PeriodFrom'
+        - $ref: '#/components/parameters/PeriodTo'
+      responses:
+        '200':
+          description: Звіт по тарифах
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { $ref: '#/components/schemas/ReportPeriod' }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/TariffReport' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reports/hourly-demand:
+    get:
+      tags: [Reports]
+      summary: Попит за годинами доби
+      description: Скільки бронювань припадає на кожну робочу годину — допомагає планувати ціни й персонал.
+      parameters:
+        - $ref: '#/components/parameters/PeriodFrom'
+        - $ref: '#/components/parameters/PeriodTo'
+      responses:
+        '200':
+          description: Звіт по годинах
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { $ref: '#/components/schemas/ReportPeriod' }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/HourlyDemand' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    RoomId:
+      name: id
+      in: path
+      required: true
+      description: Ідентифікатор залу
+      schema: { type: string, format: uuid }
+    BookingId:
+      name: id
+      in: path
+      required: true
+      description: Ідентифікатор бронювання
+      schema: { type: string, format: uuid }
+    PeriodFrom:
+      name: from
+      in: query
+      required: true
+      description: Початок періоду (ДД.ММ.РРРР)
+      schema: { type: string, example: 01.09.2024 }
+    PeriodTo:
+      name: to
+      in: query
+      required: true
+      description: Кінець періоду включно (ДД.ММ.РРРР), не більше 366 днів від початку
+      schema: { type: string, example: 30.09.2024 }
+
+  responses:
+    ValidationError:
+      description: Некоректні вхідні дані
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Некоректні вхідні дані
+              details:
+                - { location: body, field: capacity, message: Місткість має бути більшою за 0 }
+    Unauthorized:
+      description: Відсутній або недійсний API-ключ
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: UNAUTHORIZED, message: Недійсний API-ключ } }
+    Forbidden:
+      description: Недостатньо прав
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: FORBIDDEN, message: Ця дія доступна лише адміністратору } }
+    NotFound:
+      description: Ресурс не знайдено
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: NOT_FOUND, message: Зал не знайдено } }
+    Conflict:
+      description: Конфлікт із поточним станом (назва зайнята, час заброньовано тощо)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: CONFLICT, message: '"Зал A" вже заброньовано на цей час. Оберіть інший час або зал' } }
+    BusinessRuleViolation:
+      description: Запит порушує бізнес-правило
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: BUSINESS_RULE_VIOLATION, message: Зали можна бронювати лише з 06:00 до 23:00 } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, BUSINESS_RULE_VIOLATION, PAYLOAD_TOO_LARGE, TOO_MANY_REQUESTS, SERVICE_UNAVAILABLE, INTERNAL_ERROR]
+            message: { type: string }
+            details: {}
+
+    ServiceInput:
+      type: object
+      additionalProperties: false
+      required: [name, price]
+      properties:
+        name: { type: string, maxLength: 100, example: Проєктор }
+        price: { type: number, minimum: 0, example: 500, description: Ціна за одне бронювання, грн }
+
+    Service:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Проєктор }
+        price: { type: number, example: 500 }
+
+    RoomCreate:
+      type: object
+      additionalProperties: false
+      required: [name, capacity, basePricePerHour]
+      properties:
+        name: { type: string, maxLength: 100, example: Зал D }
+        capacity: { type: integer, minimum: 1, maximum: 10000, example: 50 }
+        basePricePerHour: { type: number, minimum: 0, example: 2000, description: Базова вартість години, грн }
+        services:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/ServiceInput' }
+
+    RoomUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 100 }
+        capacity: { type: integer, minimum: 1, maximum: 10000 }
+        basePricePerHour: { type: number, minimum: 0, example: 2500 }
+        services:
+          type: array
+          description: Новий повний список послуг (замінює поточний)
+          items: { $ref: '#/components/schemas/ServiceInput' }
+
+    Room:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Зал A }
+        capacity: { type: integer, example: 50 }
+        basePricePerHour: { type: number, example: 2000 }
+        currency: { type: string, example: UAH }
+        services:
+          type: array
+          items: { $ref: '#/components/schemas/Service' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AvailableRoom:
+      allOf:
+        - $ref: '#/components/schemas/Room'
+        - type: object
+          properties:
+            estimatedRentPrice: { type: number, example: 8600, description: Вартість оренди на обраний час без послуг, грн }
+
+    RoomMessageResponse:
+      type: object
+      properties:
+        message: { type: string }
+        data: { $ref: '#/components/schemas/Room' }
+
+    QuoteRequest:
+      type: object
+      additionalProperties: false
+      required: [roomId, date, startTime, durationHours]
+      properties:
+        roomId: { type: string, format: uuid }
+        date: { type: string, example: 01.09.2024 }
+        startTime: { type: string, example: '10:00' }
+        durationHours: { type: number, example: 4, description: 'Тривалість у годинах, крок 0.5' }
+        services:
+          type: array
+          items: { type: string }
+          example: [Проєктор, Wi-Fi]
+
+    BookingCreate:
+      allOf:
+        - $ref: '#/components/schemas/QuoteRequest'
+        - type: object
+          required: [customerName]
+          properties:
+            customerName: { type: string, minLength: 2, maxLength: 100, example: ТОВ "Ромашка" }
+            customerEmail: { type: string, format: email, example: office@romashka.ua }
+
+    PriceSegment:
+      type: object
+      properties:
+        tariff: { type: string, enum: [MORNING, STANDARD, PEAK, EVENING] }
+        label: { type: string, example: Пікові години (націнка 15%) }
+        from: { type: string, example: '12:00' }
+        to: { type: string, example: '14:00' }
+        hours: { type: number, example: 2 }
+        multiplier: { type: number, example: 1.15 }
+        amount: { type: number, example: 4600 }
+
+    Price:
+      type: object
+      properties:
+        currency: { type: string, example: UAH }
+        rent: { type: number, example: 8600 }
+        services: { type: number, example: 800 }
+        total: { type: number, example: 9400 }
+        rentBreakdown:
+          type: array
+          items: { $ref: '#/components/schemas/PriceSegment' }
+
+    SelectedService:
+      type: object
+      properties:
+        name: { type: string, example: Проєктор }
+        price: { type: number, example: 500 }
+
+    Quote:
+      type: object
+      properties:
+        room:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string, example: Зал A }
+        date: { type: string, example: 01.09.2024 }
+        startTime: { type: string, example: '10:00' }
+        endTime: { type: string, example: '14:00' }
+        durationHours: { type: number, example: 4 }
+        services:
+          type: array
+          items: { $ref: '#/components/schemas/SelectedService' }
+        price: { $ref: '#/components/schemas/Price' }
+
+    Booking:
+      allOf:
+        - $ref: '#/components/schemas/Quote'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [confirmed, cancelled] }
+            customer:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
+            cancelledAt: { type: string, format: date-time, nullable: true }
+
+    ReportPeriod:
+      type: object
+      properties:
+        from: { type: string, example: 01.09.2024 }
+        to: { type: string, example: 30.09.2024 }
+        days: { type: integer, example: 30 }
+
+    SummaryReport:
+      type: object
+      properties:
+        currency: { type: string, example: UAH }
+        confirmedBookings: { type: integer }
+        cancelledBookings: { type: integer }
+        cancellationRatePercent: { type: number }
+        revenue:
+          type: object
+          properties:
+            total: { type: number }
+            rent: { type: number }
+            services: { type: number }
+        averageBookingValue: { type: number }
+        bookedHours: { type: number }
+        averageDurationHours: { type: number }
+
+    RoomPerformance:
+      type: object
+      properties:
+        roomId: { type: string, format: uuid }
+        roomName: { type: string }
+        capacity: { type: integer }
+        isDeleted: { type: boolean }
+        bookingsCount: { type: integer }
+        bookedHours: { type: number }
+        occupancyRatePercent: { type: number }
+        revenue: { type: number }
+        averageBookingValue: { type: number }
+
+    ServicePopularity:
+      type: object
+      properties:
+        serviceName: { type: string }
+        timesOrdered: { type: integer }
+        shareOfBookingsPercent: { type: number }
+        revenue: { type: number }
+
+    TariffReport:
+      type: object
+      properties:
+        tariff: { type: string, enum: [MORNING, STANDARD, PEAK, EVENING] }
+        label: { type: string }
+        bookedHours: { type: number }
+        revenue: { type: number }
+        shareOfRentRevenuePercent: { type: number }
+
+    HourlyDemand:
+      type: object
+      properties:
+        hour: { type: string, example: '12:00–13:00' }
+        bookingsCount: { type: integer }
+        bookedHours: { type: number }
